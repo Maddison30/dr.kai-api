@@ -72,7 +72,7 @@ import requests
 
 # Set your API key
 headers = {
-    "X-API-Key": "your-dr-kai-api-key",
+    "Authorization": f"Bearer your-dr-kai-api-key",
     "Content-Type": "application/json"
 }
 

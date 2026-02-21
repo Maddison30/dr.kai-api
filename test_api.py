@@ -24,7 +24,7 @@ def test_medical_query(query, conversation_id=None):
     """Test the medical query endpoint"""
     print(f"🏥 Testing medical query: '{query}'")
     headers = {
-        "X-API-Key": API_KEY,
+        "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json"
     }
 
@@ -54,7 +54,7 @@ def test_invalid_api_key():
     """Test with invalid API key"""
     print("🔒 Testing invalid API key...")
     headers = {
-        "X-API-Key": "invalid-key",
+        "Authorization": "Bearer invalid-key",
         "Content-Type": "application/json"
     }
 

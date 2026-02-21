@@ -44,11 +44,19 @@ class MedicalResponse(BaseModel):
 # Simple in-memory conversation storage (in production, use Redis or database)
 conversations = {}
 
-def verify_api_key(x_api_key: str = Header(..., alias="X-API-Key")):
-    """Verify API key for authentication"""
-    if x_api_key != API_KEY:
+def verify_api_key(authorization: str = Header(None)):
+    """Verify API key from Bearer token in Authorization header"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401, 
+            detail="Missing or invalid Authorization header. Use: Authorization: Bearer YOUR_API_KEY"
+        )
+
+    token = authorization.replace("Bearer ", "").strip()
+    if token != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
-    return x_api_key
+
+    return token
 
 @app.get("/")
 async def root():
