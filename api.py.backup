@@ -1,0 +1,154 @@
+from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import List, Optional
+import os
+from dotenv import load_dotenv
+from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
+
+# Import existing agent functionality
+from main import run_agent, agent
+
+# Load environment variables
+load_dotenv()
+
+# API Key for authentication
+API_KEY = os.getenv("DR_KAI_API_KEY", "default-api-key-change-in-production")
+
+app = FastAPI(
+    title="Dr. KAI Medical Assistant API",
+    description="AI-powered medical assistant that provides evidence-based health information from approved Swedish medical sources",
+    version="1.0.0"
+)
+
+# Add CORS middleware for web access
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production, specify allowed origins
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Pydantic models for request/response
+class MedicalQuery(BaseModel):
+    query: str
+    conversation_id: Optional[str] = None  # For maintaining conversation history
+
+class MedicalResponse(BaseModel):
+    response: str
+    conversation_id: str
+    sources_used: List[str] = []
+    user_language: str = "unknown"
+
+# Simple in-memory conversation storage (in production, use Redis or database)
+conversations = {}
+
+def verify_api_key(x_api_key: str = Header(..., alias="X-API-Key")):
+    """Verify API key for authentication"""
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    return x_api_key
+
+@app.get("/")
+async def root():
+    """Health check endpoint"""
+    return {
+        "message": "Dr. KAI Medical Assistant API is running",
+        "version": "1.0.0",
+        "status": "healthy"
+    }
+
+@app.get("/health")
+async def health_check():
+    """Detailed health check"""
+    serpapi_key = bool(os.getenv("SERPAPI_API_KEY"))
+    openai_key = bool(os.getenv("OPENAI_API_KEY"))
+
+    return {
+        "status": "healthy" if (serpapi_key and openai_key) else "degraded",
+        "services": {
+            "openai_api": "configured" if openai_key else "missing",
+            "serpapi": "configured" if serpapi_key else "missing"
+        },
+        "approved_sources": ["1177.se", "socialstyrelsen.se", "viss.nu", "fass.se"]
+    }
+
+@app.post("/api/medical-query", response_model=MedicalResponse)
+async def medical_query(
+    request: MedicalQuery,
+    api_key: str = Depends(verify_api_key)
+):
+    """
+    Process a medical query and return evidence-based information from approved Swedish sources.
+
+    - **query**: The medical question or symptom description (can be in any language)
+    - **conversation_id**: Optional ID to maintain conversation context
+
+    Returns a response in the user's original language with proper source citations.
+    """
+    try:
+        # Get or create conversation history
+        conversation_id = request.conversation_id or f"conv_{os.urandom(8).hex()}"
+        history = conversations.get(conversation_id, [])
+
+        # Run the agent
+        response = run_agent(request.query, history)
+
+        # Extract sources from the response (basic parsing)
+        sources_used = []
+        if "🔗 Source:" in response.content:
+            lines = response.content.split('\n')
+            for line in lines:
+                if line.startswith("   🔗 Source:"):
+                    sources_used.append(line.replace("   🔗 Source:", "").strip())
+
+        # Extract user language from response (if available)
+        user_language = "unknown"
+        if "[Original query language:" in response.content:
+            try:
+                lang_part = response.content.split("[Original query language:")[1].split("]")[0].strip()
+                user_language = lang_part
+            except:
+                pass
+
+        # Update conversation history
+        history.extend([
+            HumanMessage(content=request.query),
+            response
+        ])
+        conversations[conversation_id] = history
+
+        # Clean up old conversations (keep last 1000)
+        if len(conversations) > 1000:
+            # Remove oldest conversations
+            oldest_keys = list(conversations.keys())[:100]
+            for key in oldest_keys:
+                del conversations[key]
+
+        return MedicalResponse(
+            response=response.content,
+            conversation_id=conversation_id,
+            sources_used=sources_used,
+            user_language=user_language
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+@app.delete("/api/conversation/{conversation_id}")
+async def clear_conversation(
+    conversation_id: str,
+    api_key: str = Depends(verify_api_key)
+):
+    """Clear conversation history for a specific conversation ID"""
+    if conversation_id in conversations:
+        del conversations[conversation_id]
+        return {"message": f"Conversation {conversation_id} cleared"}
+    else:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)</content>
+<parameter name="filePath">/Users/matilda/Företag/Dr. Kai/PythonAIAgentin10Minutes-main/api.py
