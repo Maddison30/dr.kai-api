@@ -1,10 +1,22 @@
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Any
 import os
+import logging
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, AIMessage, BaseMessage
+import json
+from pathlib import Path
+from datetime import datetime
+
+# Optional DB imports (SQLAlchemy)
+try:
+    from sqlalchemy import create_engine, Column, String, Text, DateTime
+    from sqlalchemy.orm import declarative_base, sessionmaker
+    SQLALCHEMY_AVAILABLE = True
+except Exception:
+    SQLALCHEMY_AVAILABLE = False
 
 # Import existing agent functionality
 from main import run_agent, agent
@@ -43,6 +55,170 @@ class MedicalResponse(BaseModel):
 
 # Simple in-memory conversation storage (in production, use Redis or database)
 conversations = {}
+
+# Directory to persist conversation files
+# Use absolute path for conversations directory so server cwd differences don't hide files
+CONV_DIR = Path(os.path.join(os.getcwd(), "conversations"))
+CONV_DIR.mkdir(parents=True, exist_ok=True)
+
+# Configure basic logging so we can debug persistence issues
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("dr_kai_api")
+
+# PostgreSQL / SQLAlchemy setup (if DATABASE_URL configured and SQLAlchemy available)
+DB_URL = os.getenv("DATABASE_URL")
+DB_ENGINE = None
+SessionLocal = None
+Base = None
+ConversationModel = None
+
+if DB_URL and SQLALCHEMY_AVAILABLE:
+    try:
+        DB_ENGINE = create_engine(DB_URL, echo=False, future=True)
+        SessionLocal = sessionmaker(bind=DB_ENGINE, autoflush=False, autocommit=False)
+        Base = declarative_base()
+
+        class ConversationModel(Base):
+            __tablename__ = "conversations"
+            id = Column(String(128), primary_key=True, index=True)
+            history = Column(Text, nullable=False)
+            created_at = Column(DateTime, nullable=False)
+            updated_at = Column(DateTime, nullable=False)
+
+        # Create tables (best-effort)
+        try:
+            Base.metadata.create_all(DB_ENGINE)
+        except Exception:
+            pass
+    except Exception:
+        DB_ENGINE = None
+        SessionLocal = None
+        Base = None
+        ConversationModel = None
+
+
+def save_conversation_to_file(conversation_id: str, history: List[BaseMessage]):
+    """Persist a conversation's history to a JSON file (overwrites on each save)."""
+    try:
+        out = []
+        for msg in history:
+            role = "assistant" if isinstance(msg, AIMessage) else "user"
+            out.append({
+                "role": role,
+                "content": msg.content,
+                "timestamp": datetime.utcnow().isoformat() + "Z"
+            })
+
+        file_path = CONV_DIR / f"{conversation_id}.json"
+        tmp_path = CONV_DIR / f"{conversation_id}.json.tmp"
+
+        # Write to a temp file and atomically replace to avoid partial writes
+        with tmp_path.open("w", encoding="utf-8") as f:
+            json.dump(out, f, ensure_ascii=False, indent=2)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except Exception:
+                # os.fsync may not be available on some platforms, ignore if it fails
+                pass
+
+        try:
+            os.replace(tmp_path, file_path)
+        except Exception:
+            # Fall back to rename if atomic replace not available
+            tmp_path.rename(file_path)
+
+        # Log success and file metadata for debugging
+        try:
+            stat = file_path.stat()
+            logger.info("Saved conversation %s -> %s (bytes=%d)", conversation_id, str(file_path), stat.st_size)
+        except Exception:
+            logger.info("Saved conversation %s -> %s", conversation_id, str(file_path))
+
+    except Exception:
+        # Log exception but do not raise; persistence is best-effort
+        logger.exception("Failed to save conversation %s to file", conversation_id)
+
+
+def save_conversation_to_db(conversation_id: str, history: List[BaseMessage]):
+    """Save or update conversation record in Postgres via SQLAlchemy (best-effort)."""
+    if not (DB_ENGINE and SessionLocal and Base):
+        return
+    try:
+        # Convert history to plain list
+        out = []
+        for msg in history:
+            role = "assistant" if isinstance(msg, AIMessage) else "user"
+            out.append({
+                "role": role,
+                "content": msg.content,
+                "timestamp": datetime.utcnow().isoformat() + "Z"
+            })
+        payload = json.dumps(out, ensure_ascii=False)
+
+        session = SessionLocal()
+        try:
+            now = datetime.utcnow()
+            obj = session.get(ConversationModel, conversation_id)
+            if obj:
+                obj.history = payload
+                obj.updated_at = now
+            else:
+                obj = ConversationModel(
+                    id=conversation_id,
+                    history=payload,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(obj)
+            session.commit()
+        finally:
+            session.close()
+    except Exception:
+        # Best-effort: ignore DB errors
+        pass
+
+
+def load_conversation_from_db(conversation_id: str) -> Optional[List[BaseMessage]]:
+    """Load conversation history from DB and return list of BaseMessage or None."""
+    if not (DB_ENGINE and SessionLocal and Base):
+        return None
+    try:
+        session = SessionLocal()
+        try:
+            obj = session.get(ConversationModel, conversation_id)
+            if not obj:
+                return None
+            data = json.loads(obj.history)
+            msgs: List[BaseMessage] = []
+            for item in data:
+                role = item.get("role")
+                content = item.get("content", "")
+                if role == "assistant":
+                    msgs.append(AIMessage(content=content))
+                else:
+                    msgs.append(HumanMessage(content=content))
+            return msgs
+        finally:
+            session.close()
+    except Exception:
+        return None
+
+
+def delete_conversation_from_db(conversation_id: str):
+    if not (DB_ENGINE and SessionLocal and Base):
+        return
+    try:
+        session = SessionLocal()
+        try:
+            obj = session.get(ConversationModel, conversation_id)
+            if obj:
+                session.delete(obj)
+                session.commit()
+        finally:
+            session.close()
+    except Exception:
+        pass
 
 def verify_api_key(authorization: str = Header(None)):
     """Verify API key from Bearer token in Authorization header"""
@@ -100,6 +276,16 @@ async def medical_query(
         conversation_id = request.conversation_id or f"conv_{os.urandom(8).hex()}"
         history = conversations.get(conversation_id, [])
 
+        # If not in memory, try loading from DB (if configured)
+        if not history:
+            try:
+                loaded = load_conversation_from_db(conversation_id)
+                if loaded:
+                    history = loaded
+                    conversations[conversation_id] = history
+            except Exception:
+                pass
+
         # Run the agent
         response = run_agent(request.query, history)
 
@@ -127,6 +313,17 @@ async def medical_query(
         ])
         conversations[conversation_id] = history
 
+        # Persist conversation to disk (best-effort)
+        try:
+            save_conversation_to_file(conversation_id, history)
+        except Exception:
+            pass
+        # Also persist to DB if available (best-effort)
+        try:
+            save_conversation_to_db(conversation_id, history)
+        except Exception:
+            pass
+
         # Clean up old conversations (keep last 1000)
         if len(conversations) > 1000:
             # Remove oldest conversations
@@ -152,6 +349,18 @@ async def clear_conversation(
     """Clear conversation history for a specific conversation ID"""
     if conversation_id in conversations:
         del conversations[conversation_id]
+        # Remove persisted file if present (best-effort)
+        try:
+            file_path = CONV_DIR / f"{conversation_id}.json"
+            if file_path.exists():
+                file_path.unlink()
+        except Exception:
+            pass
+        # Remove DB record if present (best-effort)
+        try:
+            delete_conversation_from_db(conversation_id)
+        except Exception:
+            pass
         return {"message": f"Conversation {conversation_id} cleared"}
     else:
         raise HTTPException(status_code=404, detail="Conversation not found")
