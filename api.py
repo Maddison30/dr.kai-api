@@ -179,6 +179,31 @@ def save_conversation_to_db(conversation_id: str, history: List[BaseMessage]):
         pass
 
 
+def load_conversation_from_file(conversation_id: str) -> Optional[List[BaseMessage]]:
+    """Load conversation history from disk (JSON) and return list of BaseMessage or None."""
+    try:
+        file_path = CONV_DIR / f"{conversation_id}.json"
+        if not file_path.exists():
+            return None
+        with file_path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        msgs: List[BaseMessage] = []
+        for item in data:
+            role = item.get("role")
+            content = item.get("content", "")
+            if role == "assistant":
+                msgs.append(AIMessage(content=content))
+            else:
+                msgs.append(HumanMessage(content=content))
+
+        logger.info("Loaded conversation %s from file (%d messages)", conversation_id, len(msgs))
+        return msgs
+    except Exception:
+        logger.exception("Failed to load conversation %s from file", conversation_id)
+        return None
+
+
 def load_conversation_from_db(conversation_id: str) -> Optional[List[BaseMessage]]:
     """Load conversation history from DB and return list of BaseMessage or None."""
     if not (DB_ENGINE and SessionLocal and Base):
@@ -276,7 +301,7 @@ async def medical_query(
         conversation_id = request.conversation_id or f"conv_{os.urandom(8).hex()}"
         history = conversations.get(conversation_id, [])
 
-        # If not in memory, try loading from DB (if configured)
+        # If not in memory, try loading from DB (if configured), then from disk
         if not history:
             try:
                 loaded = load_conversation_from_db(conversation_id)
@@ -285,6 +310,27 @@ async def medical_query(
                     conversations[conversation_id] = history
             except Exception:
                 pass
+
+        if not history:
+            # Try file-based load as a fallback when DB isn't configured or the record isn't found
+            try:
+                loaded_file = load_conversation_from_file(conversation_id)
+                if loaded_file:
+                    history = loaded_file
+                    conversations[conversation_id] = history
+            except Exception:
+                pass
+
+        # Debug: log how many messages are present before invoking the agent
+        try:
+            logger.info("Invoking agent for %s (history messages=%d)", conversation_id, len(history))
+            if len(history) > 0:
+                # show a short preview of first and last messages
+                first = history[0].content if hasattr(history[0], 'content') else str(history[0])
+                last = history[-1].content if hasattr(history[-1], 'content') else str(history[-1])
+                logger.info("History preview - first: %s | last: %s", (first[:120] if first else ''), (last[:120] if last else ''))
+        except Exception:
+            logger.exception("Failed to log history preview for %s", conversation_id)
 
         # Run the agent
         response = run_agent(request.query, history)
@@ -347,15 +393,18 @@ async def clear_conversation(
     api_key: str = Depends(verify_api_key)
 ):
     """Clear conversation history for a specific conversation ID"""
+    # Remove in-memory state if present
     if conversation_id in conversations:
         del conversations[conversation_id]
-        # Remove persisted file if present (best-effort)
-        try:
-            file_path = CONV_DIR / f"{conversation_id}.json"
-            if file_path.exists():
-                file_path.unlink()
-        except Exception:
-            pass
+
+    # Remove persisted file if present (best-effort)
+    try:
+        file_path = CONV_DIR / f"{conversation_id}.json"
+        if file_path.exists():
+            file_path.unlink()
+            logger.info("Deleted conversation file %s", str(file_path))
+    except Exception:
+        logger.exception("Failed to delete conversation file %s", conversation_id)
         # Remove DB record if present (best-effort)
         try:
             delete_conversation_from_db(conversation_id)

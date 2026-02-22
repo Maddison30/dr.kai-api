@@ -1,0 +1,22 @@
+[
+  {
+    "role": "user",
+    "content": "My special identifier is XYZTEST999. Please remember this for follow-up questions.",
+    "timestamp": "2026-02-22T03:12:59.387245Z"
+  },
+  {
+    "role": "assistant",
+    "content": "Of course, I'll remember your special identifier, XYZTEST999, for any follow-up questions. How can I assist you with your health queries today?",
+    "timestamp": "2026-02-22T03:12:59.387251Z"
+  },
+  {
+    "role": "user",
+    "content": "Do you still remember my special identifier from earlier?",
+    "timestamp": "2026-02-22T03:12:59.387254Z"
+  },
+  {
+    "role": "assistant",
+    "content": "Yes, I remember your special identifier. It's XYZTEST999. How can I assist you further?",
+    "timestamp": "2026-02-22T03:12:59.387256Z"
+  }
+]

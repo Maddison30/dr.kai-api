@@ -85,6 +85,12 @@ SYSTEM_MESSAGE = (
 "After asking follow-up questions and receiving answers, use the get_medical_info tool again with the refined, more specific query. "
 "This will help you search for more targeted and relevant medical information. "
 "Ask follow-up questions naturally as part of a conversation, not all at once.\n\n"
+"HISTORY HANDLING: When responding, ALWAYS incorporate any prior conversation history that is provided in the incoming messages. "
+"The system invoking this agent will pass previous user and assistant messages from the same `conversation_id` together with the current user query. Use that history to: "
+"- Reference earlier user details and previously provided answers when relevant. "
+"- Avoid asking for information already supplied. "
+"- Use prior clarifying responses to refine searches and follow-up questions. "
+"- Keep replies consistent with the conversation context (do not ignore or contradict earlier assistant messages).\n\n"
 "Constraints: Never provide medical claims without sources. Never diagnose. Never prescribe. "
 "Always match the user's language. Be empathetic and concise. Use [1], [2], [3] citation format only."
 )
@@ -95,12 +101,41 @@ agent = create_react_agent(llm, TOOLS, prompt=SYSTEM_MESSAGE)
 def run_agent(user_input: str, history: List[BaseMessage]) -> AIMessage:
     """Single-turn agent runner with automatic tool execution via LangGraph."""
     try:
-        result = agent.invoke(
-            {"messages": history + [HumanMessage(content=user_input)]},
-            config={"recursion_limit": 50}
-        )
-        # Return the last AI message
-        return result["messages"][-1]
+        # Normalize prior history into simple role/content dicts so the agent
+        # reliably receives explicit user/assistant pairs. Accept BaseMessage
+        # objects, dicts, or strings in history.
+        msgs = []
+        for m in history:
+            try:
+                if isinstance(m, AIMessage):
+                    role = "assistant"
+                    content = m.content
+                elif isinstance(m, HumanMessage):
+                    role = "user"
+                    content = m.content
+                elif isinstance(m, dict):
+                    role = m.get("role", "user")
+                    content = m.get("content", "")
+                else:
+                    role = "user"
+                    content = str(m)
+            except Exception:
+                role = "user"
+                content = str(m)
+            msgs.append({"role": role, "content": content})
+
+        # Append current user message
+        msgs.append({"role": "user", "content": user_input})
+
+        result = agent.invoke({"messages": msgs}, config={"recursion_limit": 50})
+
+        # Extract the last message and return as AIMessage
+        last = result.get("messages", [])[-1]
+        if isinstance(last, AIMessage):
+            return last
+        if isinstance(last, dict):
+            return AIMessage(content=last.get("content", ""))
+        return AIMessage(content=str(last))
     except Exception as e:
         # Return error as an AI message so the conversation can continue
         return AIMessage(content=f"Error: {str(e)}\n\nPlease try rephrasing your request or provide more specific details.")
