@@ -1,0 +1,12 @@
+[
+  {
+    "role": "user",
+    "content": "What causes fever?",
+    "timestamp": "2026-02-22T03:27:44.834236Z"
+  },
+  {
+    "role": "assistant",
+    "content": "Fever is commonly caused by infections, which can be due to viruses, such as colds and flu, or bacteria. It is one of the body's ways to defend itself against these infections[<a href='https://www.1177.se/sjukdomar--besvar/infektioner/feber/feber/'>1</a>][<a href='https://www.1177.se/sjukdomar--besvar/infektioner/feber/feber-hos-barn/'>3</a>]. When an infection occurs, the body often reacts by raising its temperature to protect itself[<a href='https://www.1177.se/sjukdomar--besvar/infektioner/feber/'>2</a>]. \n\nIf you have a fever, it's important to monitor your symptoms. If your fever is high or persists for more than a few days, or if it's accompanied by other severe symptoms, you should seek medical attention. \n\nI am not a doctor. If symptoms worsen, contact a healthcare professional.",
+    "timestamp": "2026-02-22T03:27:44.834243Z"
+  }
+]
